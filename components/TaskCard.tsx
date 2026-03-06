@@ -1,10 +1,10 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { useMutation } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { PRIORITY_CONFIG, formatDate, isOverdue, cn } from "@/lib/utils";
-import { Flag, Calendar, Trash2, Target, Pencil, Check, X, Undo2 } from "lucide-react";
+import { Flag, Calendar, Trash2, Target, Pencil, Check, Undo2, FolderOpen } from "lucide-react";
 import { FocusMode } from "./FocusMode";
 import type { Id } from "@/convex/_generated/dataModel";
 
@@ -17,6 +17,7 @@ interface Task {
   focusSessions: number;
   labels:        string[];
   projectId?:    string;
+  userId:        string;
 }
 
 const PRIORITIES = [1, 2, 3, 4] as const;
@@ -32,17 +33,18 @@ function timestampToDateInput(ts: number): string {
 }
 
 export function TaskCard({ task, userId }: { task: Task; userId: string }) {
-  const [focusMode,    setFocusMode]    = useState(false);
+  const [focusMode,     setFocusMode]     = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [editing,      setEditing]      = useState(false);
-  const [undoVisible,  setUndoVisible]  = useState(false);
+  const [editing,       setEditing]       = useState(false);
+  const [undoVisible,   setUndoVisible]   = useState(false);
   const [justCompleted, setJustCompleted] = useState(false);
 
   // Edit state
-  const [editTitle,    setEditTitle]    = useState(task.title);
-  const [editPriority, setEditPriority] = useState<1|2|3|4>(task.priority);
-  const [editDueDate,  setEditDueDate]  = useState(task.dueDate ? timestampToDateInput(task.dueDate) : "");
-  const [saving,       setSaving]       = useState(false);
+  const [editTitle,     setEditTitle]     = useState(task.title);
+  const [editPriority,  setEditPriority]  = useState<1|2|3|4>(task.priority);
+  const [editDueDate,   setEditDueDate]   = useState(task.dueDate ? timestampToDateInput(task.dueDate) : "");
+  const [editProjectId, setEditProjectId] = useState<string>(task.projectId ?? "");
+  const [saving,        setSaving]        = useState(false);
 
   const undoTimer = useRef<NodeJS.Timeout | null>(null);
 
@@ -51,10 +53,16 @@ export function TaskCard({ task, userId }: { task: Task; userId: string }) {
   const deleteTask     = useMutation(api.tasks.deleteTask);
   const updateTask     = useMutation(api.tasks.updateTask);
 
+  // Load projects for the dropdown
+  const projects = useQuery(api.projects.getProjects, userId ? { userId } : "skip") ?? [];
+
   const priority = PRIORITY_CONFIG[task.priority];
   const overdue  = task.dueDate ? isOverdue(task.dueDate) : false;
 
-  // Complete with undo window
+  // Current project name for display
+  const currentProject = projects.find((p) => p._id === task.projectId);
+
+  // Complete with 5-second undo window
   const handleComplete = async () => {
     setJustCompleted(true);
     setUndoVisible(true);
@@ -73,22 +81,20 @@ export function TaskCard({ task, userId }: { task: Task; userId: string }) {
     return () => { if (undoTimer.current) clearTimeout(undoTimer.current); };
   }, []);
 
-  // Delete with inline confirmation
-  const handleDeleteClick = () => setConfirmDelete(true);
   const handleDeleteConfirm = async () => {
     await deleteTask({ taskId: task._id });
   };
 
-  // Save edits
   const handleSave = async () => {
     if (!editTitle.trim()) return;
     setSaving(true);
     try {
       await updateTask({
-        taskId:   task._id,
-        title:    editTitle.trim(),
-        priority: editPriority,
-        dueDate:  editDueDate ? localDateTimestamp(editDueDate) : undefined,
+        taskId:    task._id,
+        title:     editTitle.trim(),
+        priority:  editPriority,
+        dueDate:   editDueDate ? localDateTimestamp(editDueDate) : undefined,
+        projectId: editProjectId || undefined,
       });
       setEditing(false);
     } finally {
@@ -119,9 +125,7 @@ export function TaskCard({ task, userId }: { task: Task; userId: string }) {
   if (confirmDelete) {
     return (
       <div className="flex items-center gap-3 px-3 py-2.5 rounded-xl border border-red-100 bg-red-50">
-        <span className="text-sm text-red-700 flex-1 min-w-0 truncate">
-          Delete "{task.title}"?
-        </span>
+        <span className="text-sm text-red-700 flex-1 min-w-0 truncate">Delete "{task.title}"?</span>
         <button
           onClick={handleDeleteConfirm}
           className="flex-shrink-0 text-xs font-semibold text-white bg-red-500 hover:bg-red-600 px-2.5 py-1 rounded-lg transition-colors"
@@ -149,7 +153,9 @@ export function TaskCard({ task, userId }: { task: Task; userId: string }) {
           onKeyDown={(e) => { if (e.key === "Escape") setEditing(false); if (e.key === "Enter") handleSave(); }}
           className="w-full text-sm text-gray-800 outline-none border border-gray-200 rounded-lg px-3 py-1.5 focus:border-[#1b2a4a]"
         />
+
         <div className="flex items-center gap-2 flex-wrap">
+          {/* Priority */}
           <div className="flex gap-1">
             {PRIORITIES.map((p) => (
               <button
@@ -159,7 +165,7 @@ export function TaskCard({ task, userId }: { task: Task; userId: string }) {
                 className={cn(
                   "px-2 py-0.5 text-xs rounded border font-medium transition-all",
                   editPriority === p
-                    ? PRIORITY_CONFIG[p].bg + " " + PRIORITY_CONFIG[p].color + " " + PRIORITY_CONFIG[p].border
+                    ? cn(PRIORITY_CONFIG[p].bg, PRIORITY_CONFIG[p].color, PRIORITY_CONFIG[p].border)
                     : "border-gray-200 text-gray-400 hover:border-gray-300"
                 )}
               >
@@ -167,16 +173,39 @@ export function TaskCard({ task, userId }: { task: Task; userId: string }) {
               </button>
             ))}
           </div>
-          <div className="flex items-center gap-1 ml-auto text-gray-400">
-            <Calendar className="w-3.5 h-3.5" />
+
+          {/* Due date */}
+          <div className={cn(
+            "flex items-center gap-1.5 px-2 py-1 rounded-lg border transition-colors ml-auto",
+            editDueDate
+              ? "border-[#1b2a4a]/30 bg-[#1b2a4a]/5 text-[#1b2a4a]"
+              : "border-gray-200 text-gray-500 hover:border-gray-300"
+          )}>
+            <Calendar className="w-3.5 h-3.5 flex-shrink-0" />
             <input
               type="date"
               value={editDueDate}
               onChange={(e) => setEditDueDate(e.target.value)}
-              className="text-xs outline-none bg-transparent text-gray-500"
+              className="text-xs outline-none bg-transparent text-gray-700 w-28"
             />
           </div>
         </div>
+
+        {/* Project picker */}
+        <div className="flex items-center gap-2">
+          <FolderOpen className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
+          <select
+            value={editProjectId}
+            onChange={(e) => setEditProjectId(e.target.value)}
+            className="flex-1 text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-[#1b2a4a] text-gray-700 bg-white"
+          >
+            <option value="">No project (Inbox)</option>
+            {projects.map((p) => (
+              <option key={p._id} value={p._id}>{p.name}</option>
+            ))}
+          </select>
+        </div>
+
         <div className="flex gap-2">
           <button
             onClick={handleSave}
@@ -199,12 +228,10 @@ export function TaskCard({ task, userId }: { task: Task; userId: string }) {
   // Normal view
   return (
     <>
-      <div
-        className={cn(
-          "group flex items-start gap-3 p-3 rounded-xl border bg-white transition-all hover:shadow-sm",
-          overdue ? "border-red-100 bg-red-50/30" : "border-gray-100"
-        )}
-      >
+      <div className={cn(
+        "group flex items-start gap-3 p-3 rounded-xl border bg-white transition-all hover:shadow-sm",
+        overdue ? "border-red-100 bg-red-50/30" : "border-gray-100"
+      )}>
         {/* Complete button */}
         <button
           onClick={handleComplete}
@@ -232,6 +259,12 @@ export function TaskCard({ task, userId }: { task: Task; userId: string }) {
               <Flag className="w-3 h-3" />
               {priority.label}
             </span>
+            {currentProject && (
+              <span className="flex items-center gap-1 text-xs text-gray-400">
+                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: currentProject.color }} />
+                {currentProject.name}
+              </span>
+            )}
             {task.focusSessions > 0 && (
               <span className="flex items-center gap-1 text-xs text-purple-400">
                 <Target className="w-3 h-3" />
@@ -239,14 +272,12 @@ export function TaskCard({ task, userId }: { task: Task; userId: string }) {
               </span>
             )}
             {task.labels.map((l) => (
-              <span key={l} className="text-xs bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded">
-                {l}
-              </span>
+              <span key={l} className="text-xs bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded">{l}</span>
             ))}
           </div>
         </div>
 
-        {/* Actions — visible on hover */}
+        {/* Actions */}
         <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
           <button
             onClick={() => setEditing(true)}
@@ -263,7 +294,7 @@ export function TaskCard({ task, userId }: { task: Task; userId: string }) {
             <Target className="w-3.5 h-3.5" />
           </button>
           <button
-            onClick={handleDeleteClick}
+            onClick={() => setConfirmDelete(true)}
             className="p-1.5 rounded-lg hover:bg-red-50 text-gray-300 hover:text-red-400 transition-colors"
             title="Delete task"
           >
@@ -272,9 +303,7 @@ export function TaskCard({ task, userId }: { task: Task; userId: string }) {
         </div>
       </div>
 
-      {focusMode && (
-        <FocusMode task={task} onClose={() => setFocusMode(false)} />
-      )}
+      {focusMode && <FocusMode task={task} onClose={() => setFocusMode(false)} />}
     </>
   );
 }
